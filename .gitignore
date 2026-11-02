@@ -1,0 +1,12 @@
+__pycache__/
+.vscode/
+build/
+dist/
+.venv/
+venv/
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.wmv
+*.pt
