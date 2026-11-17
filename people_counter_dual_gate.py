@@ -427,13 +427,65 @@ def pending_tracks_in_box(
     return overlapping_ids
 
 
-def motion_conflicts_with_direction(previous_center_x, current_center_x, direction):
+def motion_conflicts_with_direction(
+    previous_center_x, current_center_x, direction, history, frame_index, box_height
+):
     if previous_center_x is None:
         return False
     displacement = current_center_x - previous_center_x
     if direction == "left-to-right":
-        return displacement < -2
-    return displacement > 2
+        if displacement < -2:
+            return True
+    elif displacement > 2:
+        return True
+
+    recent = [sample for sample in history if frame_index - sample[2] <= 12]
+    if len(recent) < 3:
+        return False
+    displacement = current_center_x - recent[0][0]
+    tolerance = max(8, box_height * 0.05)
+    if direction == "left-to-right":
+        return displacement < -tolerance
+    return displacement > tolerance
+
+
+def recent_overlapping_motion_conflicts(source, track_id, box, direction):
+    x1, y1, x2, y2 = box
+    area = (x2 - x1) * (y2 - y1)
+    if area <= 0:
+        return False
+    visible_ids = (
+        source.visible_track_boxes
+        if source.visible_tracks_frame == source.frame_index
+        else {}
+    )
+    for other_id, previous_box in source.last_track_boxes.items():
+        if (
+            other_id == track_id
+            or other_id in source.pending_directions
+            or other_id in visible_ids
+            or tuple(sorted((track_id, other_id))) in source.separated_track_pairs
+        ):
+            continue
+        px1, py1, px2, py2, last_seen = previous_box
+        if not 0 < source.frame_index - last_seen <= 10:
+            continue
+        previous_area = (px2 - px1) * (py2 - py1)
+        if previous_area <= 0:
+            continue
+        overlap = max(0, min(x2, px2) - max(x1, px1)) * max(
+            0, min(y2, py2) - max(y1, py1)
+        )
+        if overlap < min(area, previous_area) * 0.5:
+            continue
+        history = source.track_history.get(other_id, [])
+        recent = [sample for sample in history if source.frame_index - sample[2] <= 12]
+        if len(recent) >= 3 and motion_conflicts_with_direction(
+            recent[-2][0], recent[-1][0], direction, recent, source.frame_index,
+            py2 - py1,
+        ):
+            return True
+    return False
 
 
 def pending_tracks_across_gate(
@@ -707,7 +759,9 @@ def update_track_crossing(
     )
     previous_box = source.last_track_boxes.get(track_id)
     previous_center_x = source.last_center_x.get(track_id)
-    source.track_history.setdefault(track_id, []).append((center_x, y2))
+    source.track_history.setdefault(track_id, []).append(
+        (center_x, y2, source.frame_index)
+    )
     source.track_history[track_id] = source.track_history[track_id][-12:]
     pending_timeout = seconds_to_frames(source, PENDING_CROSSING_TIMEOUT_SECONDS)
     source.recent_gate_starts = [
@@ -850,8 +904,26 @@ def update_track_crossing(
         inferred_missing_first_gate = False
         current_track_direction = source.pending_directions.get(track_id)
         motion_conflicts = motion_conflicts_with_direction(
-            previous_center_x, center_x, direction
+            previous_center_x, center_x, direction, source.track_history[track_id],
+            source.frame_index, y2 - y1,
         )
+        if (
+            not motion_conflicts
+            and current_track_direction is None
+            and any(
+                pending_direction == direction
+                for pending_direction in source.pending_directions.values()
+            )
+            and not motion_conflicts_with_direction(
+                previous_center_x, center_x,
+                "right-to-left" if direction == "left-to-right" else "left-to-right",
+                source.track_history[track_id], source.frame_index, y2 - y1,
+            )
+            and recent_overlapping_motion_conflicts(
+                source, track_id, (x1, y1, x2, y2), direction
+            )
+        ):
+            motion_conflicts = True
         if current_track_direction is not None:
             candidate_ids = [track_id] if current_track_direction == direction else []
         elif (track_id, direction) in source.counted_track_directions:
@@ -913,7 +985,7 @@ def update_track_crossing(
                 if debug_counting and pending_ids:
                     print(
                         f"\n[计数诊断] {source.name} ID:{track_id} "
-                        f"跨ID补配拒绝：新轨迹运动方向与待计方向相反"
+                        f"跨ID补配拒绝：新轨迹或近期重叠轨迹运动方向与待计方向相反"
                         f"（方向={direction}，待计ID={pending_ids}）"
                     )
             else:

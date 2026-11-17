@@ -687,6 +687,169 @@ class GateCrossingTests(unittest.TestCase):
             wide_box=False
         )
 
+    def test_recent_motion_blocks_false_reverse_association_after_small_last_step(self):
+        self.source.left_gate_y = (0, 1080)
+        self.source.right_gate_y = (0, 1080)
+        boxes = [
+            (9881, (632, 433, 821, 784)),
+            (9882, (634, 432, 825, 788)),
+            (9883, (639, 429, 830, 789)),
+            (9884, (641, 427, 830, 788)),
+            (9885, (635, 424, 820, 786)),
+            (9886, (649, 420, 835, 788)),
+            (9887, (654, 416, 839, 785)),
+            (9888, (659, 411, 842, 777)),
+            (9889, (663, 408, 847, 774)),
+            (9890, (667, 405, 851, 771)),
+            (9892, (669, 401, 860, 784)),
+        ]
+        for frame, box in boxes:
+            self.source.frame_index = frame
+            update_track_crossing(self.source, 392, box, 868, 1014)
+
+        self.source.pending_directions[349] = "right-to-left"
+        self.source.last_center_x[349] = 989.5
+        self.source.last_track_boxes[349] = (952, 159, 1027, 289, 9777)
+        self.source.frame_index = 9893
+        output = StringIO()
+        with redirect_stdout(output):
+            update_track_crossing(
+                self.source, 392, (670, 399, 863, 786), 868, 1014,
+                debug_counting=True,
+            )
+
+        self.assertEqual(self.source.count_out, 0)
+        self.assertEqual(self.source.pending_directions[349], "right-to-left")
+        self.assertIn("运动方向与待计方向相反", output.getvalue())
+
+    def test_recent_motion_blocks_opposite_box_association_in_both_directions(self):
+        for direction in ("left-to-right", "right-to-left"):
+            with self.subTest(direction=direction):
+                source = SourceState(
+                    name="test", window_name="test", capture=cv2.VideoCapture(),
+                    left_gate_y=(0, 1080), right_gate_y=(0, 1080),
+                )
+                try:
+                    positions = [250, 240, 230, 220]
+                    if direction == "right-to-left":
+                        positions = [300 - x for x in positions]
+                    for frame, x in enumerate(positions, 1):
+                        source.frame_index = frame
+                        update_track_crossing(
+                            source, 2, (x - 10, 80, x + 10, 120), 100, 200
+                        )
+                    source.pending_directions[1] = direction
+                    source.last_center_x[1] = 180 if direction == "left-to-right" else 120
+                    source.last_track_boxes[1] = (
+                        source.last_center_x[1] - 10, 80,
+                        source.last_center_x[1] + 10, 120, 4,
+                    )
+                    source.frame_index = 5
+                    x = 218 if direction == "left-to-right" else 82
+                    update_track_crossing(
+                        source, 2, (x - 60, 80, x + 60, 120), 100, 200
+                    )
+                    self.assertEqual(source.count_in + source.count_out, 0)
+                    self.assertEqual(source.pending_directions[1], direction)
+                finally:
+                    source.capture.release()
+
+    def test_recent_motion_preserves_matching_id_switch_after_small_last_step(self):
+        for frame, x in enumerate((90, 80, 70, 60), 1):
+            self.observe(frame, 2, x)
+        self.source.pending_directions[1] = "right-to-left"
+        self.source.last_center_x[1] = 150
+        self.source.last_track_boxes[1] = (140, 80, 160, 120, 4)
+
+        self.observe(5, 2, 58)
+
+        self.assertEqual(self.source.count_out, 1)
+        self.assertNotIn(1, self.source.pending_directions)
+
+    def test_old_motion_does_not_block_id_switch_after_detection_gap(self):
+        for frame, x in enumerate((250, 240, 230), 1):
+            self.observe(frame, 2, x)
+        self.source.pending_directions[1] = "left-to-right"
+        self.source.last_center_x[1] = 180
+        self.source.last_track_boxes[1] = (170, 80, 190, 120, 29)
+
+        self.observe(30, 2, 231)
+
+        self.assertEqual(self.source.count_in, 1)
+        self.assertNotIn(1, self.source.pending_directions)
+
+    def test_new_id_does_not_reuse_reverse_pending_after_opposite_track_disappears(self):
+        self.source.left_gate_y = (0, 1080)
+        self.source.right_gate_y = (0, 1080)
+        for frame, box in [
+            (9887, (654, 416, 839, 785)),
+            (9888, (659, 411, 842, 777)),
+            (9889, (663, 408, 847, 774)),
+            (9890, (667, 405, 851, 771)),
+            (9892, (669, 401, 860, 784)),
+            (9893, (670, 399, 863, 786)),
+            (9894, (677, 399, 863, 775)),
+            (9895, (678, 398, 865, 780)),
+            (9896, (701, 397, 851, 695)),
+            (9897, (710, 396, 848, 663)),
+            (9898, (704, 313, 867, 631)),
+            (9899, (730, 292, 873, 575)),
+        ]:
+            self.source.frame_index = frame
+            update_track_crossing(self.source, 392, box, 868, 1014)
+        self.source.pending_directions[349] = "right-to-left"
+        self.source.last_center_x[349] = 989.5
+        self.source.last_track_boxes[349] = (952, 159, 1027, 289, 9777)
+
+        self.source.frame_index = 9904
+        update_track_crossing(
+            self.source, 400, (709, 372, 879, 739), 868, 1014
+        )
+        self.assertEqual(self.source.count_out, 0)
+        self.assertEqual(self.source.pending_directions[349], "right-to-left")
+
+        for frame, box in [
+            (9905, (718, 369, 878, 716)),
+            (9906, (723, 367, 880, 709)),
+            (9907, (723, 366, 887, 724)),
+            (9925, (785, 350, 955, 700)),
+            (9981, (935, 200, 1105, 500)),
+        ]:
+            self.source.frame_index = frame
+            update_track_crossing(self.source, 400, box, 868, 1014)
+        self.assertEqual(self.source.count_out, 0)
+        self.assertEqual(self.source.count_in, 1)
+
+    def test_visible_opposite_track_does_not_block_another_new_track(self):
+        self.source.left_gate_y = (0, 319)
+        self.source.right_gate_y = (0, 319)
+        for frame, x in enumerate((50, 60, 70), 1):
+            self.observe(frame, 2, x)
+        self.source.pending_directions[1] = "right-to-left"
+        self.source.last_center_x[1] = 150
+        self.source.last_track_boxes[1] = (140, 80, 160, 120, 3)
+        self.source.frame_index = 4
+        boxes = [(65, 80, 85, 120), (64, 80, 84, 120)]
+        update_nested_track_pairs(self.source, [2, 3], boxes)
+
+        update_track_crossing(self.source, 3, boxes[1], 100, 200)
+
+        self.assertEqual(self.source.count_out, 1)
+
+    def test_new_track_with_confirmed_matching_motion_can_complete(self):
+        for frame, x in enumerate((50, 60, 70), 1):
+            self.observe(frame, 2, x)
+        self.source.pending_directions[1] = "right-to-left"
+        self.source.last_center_x[1] = 150
+        self.source.last_track_boxes[1] = (140, 80, 160, 120, 3)
+
+        self.observe(4, 3, 75)
+        self.assertEqual(self.source.count_out, 0)
+        self.observe(5, 3, 60)
+
+        self.assertEqual(self.source.count_out, 1)
+        self.assertNotIn(1, self.source.pending_directions)
+
     def test_previously_counted_track_cannot_reuse_another_tracks_pending_state(self):
         self.observe(1, 1, 250)
         self.observe(2, 1, 150)
